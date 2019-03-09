@@ -5,6 +5,9 @@ defmodule Tinker.Application do
   def start(_type, _args) do
     children = [
       Tinker.Buttons.PlayPause,
+      Tinker.Buttons.PreviousTrack,
+      Tinker.Buttons.NextTrack,
+      Tinker.Buttons.Shuffle,
       worker(Nerves.IO.RC522, [{Tinker.RFIDHandler, :tag_scanned}])
     ]
 
