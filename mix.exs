@@ -23,9 +23,9 @@ defmodule Tinker.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-	{:circuits_gpio, "~> 0.1"},
-	{:circuits_spi, "~> 0.1"},
-	{:nerves_io_rc522, "~> 0.1.0"}
+      {:circuits_gpio, "~> 0.4"},
+      {:circuits_spi, "~> 0.1"},
+      {:nerves_io_rc522, "~> 0.1.0"}
     ]
   end
 end
