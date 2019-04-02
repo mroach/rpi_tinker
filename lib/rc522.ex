@@ -45,7 +45,8 @@ defmodule RC522 do
   @valid_registers Map.values(@register)
 
   # MFRC522 documentation 10.3 "Command overview"
-  # Use with the "command" register
+  # Use with the "command" register to send commands to the PCD
+  # PCD = Proximity Coupling Device. The RFID reader itself.
   @command %{
     idle:          0x00,  # no action, cancels current command execution
     mem:           0x01,  # stores 25 bytes into the internal buffer
@@ -59,6 +60,8 @@ defmodule RC522 do
     soft_reset:    0x0F   # perform a soft reset
   }
 
+  # Proximity Integrated Circuit Card (PICC)
+  # The RFID Card or Tag using the ISO/IEC 14443A interface, for example Mifare or NTAG203.
   @picc %{
     request_idl:  0x26, # REQuest command, Type A. Invites PICCs in state IDLE to go to READY and prepare for anticollision or selection. 7 bit frame.
     request_all:  0x52, # Wake-UP command, Type A. Invites PICCs in state IDLE and HALT to go to READY(*) and prepare for anticollision or selection. 7 bit frame.
@@ -73,11 +76,9 @@ defmodule RC522 do
   @gpio_reset_pin 25
 
   def initialize(spi) do
+    hard_reset()
+
     spi
-    |> reset
-    #|> write(@register.tx_mode, 0x00)
-    #|> write(@register.rx_mode, 0x00)
-    #|> write(@register.mod_width, 0x26)
     |> write(@register.t_mode, 0x8D)
     |> write(@register.t_prescaler, 0x3E)
     |> write(@register.t_reload_l, 0x30)
@@ -85,9 +86,13 @@ defmodule RC522 do
     |> write(@register.tx_auto, 0x40)
     |> write(@register.mode, 0x3D)
     |> antenna_on
+    |> set_interrupts
+  end
 
-    hwver = hardware_version(spi)
-    Logger.info "Found #{hwver.chip_type} version #{hwver.version}"
+  def set_interrupts(spi) do
+    spi
+    |> write(0x04, 0x00)
+    |> write(0x02, 0xA0)
   end
 
   @doc """
@@ -106,7 +111,7 @@ defmodule RC522 do
   defp chip_type(9), do: :mfrc522
   defp chip_type(type), do: "unknown_#{ type }"
 
-  def read_id(spi) do
+  def read_tag_id(spi) do
     request(spi, @picc.request_idl)
     anticoll(spi)
     #uid
@@ -114,7 +119,7 @@ defmodule RC522 do
 
   def card_id_to_number(data) do
     data
-    |> Enum.take(5)
+    |> Enum.take(5) # should only be five blocks, but just be sure
     |> Enum.reduce(0, fn x, acc -> acc * 256 + x end)
   end
 
@@ -143,13 +148,15 @@ defmodule RC522 do
   def to_card(spi, command, data) do
     # THESE ARE ONLY FOR COMMAND == transceive
     irq_en = 0x77
-    wait_irq = 0x30
+    wait_irq = 0x30   # RxIRq and IdleIRq
 
     spi
-    |> write(@register.comm_ien, bor(0x80, irq_en))
-    |> clear_bit_mask(@register.comm_irq, 0x80)
-    |> set_bit_bask(@register.fifo_level, 0x80)
-    |> write(@register.command, @command.idle)
+    |> write(@register.command, @command.idle)        # stop any active commands
+    #|> write(@register.comm_irq, 0x7F)                # clear all interrupt request bits
+    |> write(@register.fifo_level, 0x80)              # FlushBuffer = 1, FIFO init
+    #|> write(@register.comm_ien, bor(0x80, irq_en))
+    #|> clear_bit_mask(@register.comm_irq, 0x80)
+    #|> set_bit_bask(@register.fifo_level, 0x80)
     |> write(@register.fifo_data, data)
     |> write(@register.command, command)
 
@@ -160,14 +167,11 @@ defmodule RC522 do
     # TODO: replace this with that loop that reads the Comm IRQ and does stuff
     :timer.sleep(100)
 
-    clear_bit_mask(spi, @register.bit_framing, 0x80)
-
-    {back_data, back_len} = read_fifo(spi)
-    {:ok, back_data, back_len}
+    data = read_fifo(spi)
+    {:ok, data}
   end
 
   def anticoll(spi) do
-    Logger.debug "Anticoll"
     write(spi, @register.bit_framing, 0x00)
 
     #{status, back_data, back_bits} =
@@ -178,46 +182,24 @@ defmodule RC522 do
     #{status, back_data}
   end
 
-  def reset(spi) do
+  def hard_reset do
     {:ok, gpio} = GPIO.open(@gpio_reset_pin, :output)
     GPIO.write(gpio, 1)
-
-    write(spi, @register.command, @command.soft_reset)
-    :timer.sleep(150)
-    spi
+    :timer.sleep(50)
+    GPIO.close(gpio)
   end
 
-  def last_error(spi) do
-    read(spi, @register.error) &&& 0x1B
-  end
+  def soft_reset(spi), do: write(spi, @register.command, @command.soft_reset)
+
+  def last_error(spi), do: read(spi, @register.error) &&& 0x1B
 
   def read_fifo(spi) do
-    level = read(spi, @register.fifo_level)
-    last_bits = read(spi, @register.control) &&& 0x07
-
-    back_len = case last_bits do
-      0 -> level * 8
-      n -> (n - 1) * 8 + last_bits
-    end
-
-    # max fifo length is 16
-    blocks = case level do
-      val when val == 0 -> 1
-      val when val > 16 -> 16
-      val -> val
-    end
-
-    back_data = Enum.map(0..blocks, fn _ix -> read(spi, @register.fifo_data) end)
-
-    {back_data, back_len}
+    fifo_byte_count = read(spi, @register.fifo_level)
+    read(spi, @register.fifo_data, fifo_byte_count)
   end
 
   def antenna_on(spi) do
-    state = read(spi, @register.tx_control)
-    if (state &&& @tx_control.antenna_on) != @tx_control.antenna_on do
-      set_bit_bask(spi, @register.tx_control, @tx_control.antenna_on)
-    end
-    spi
+    set_bit_bask(spi, @register.tx_control, @tx_control.antenna_on)
   end
 
   def antenna_off(spi) do
@@ -226,8 +208,7 @@ defmodule RC522 do
 
   def set_bit_bask(spi, register, mask) when register in @valid_registers do
     state = read(spi, register)
-    value = bor(state, mask)
-    write(spi, register, value)
+    write(spi, register, bor(state, mask))
   end
 
   def clear_bit_mask(spi, register, mask) when register in @valid_registers do
@@ -236,27 +217,44 @@ defmodule RC522 do
     write(spi, register, value)
   end
 
-  def write(spi, register, values) when is_list(values) do
-    Logger.debug "Writing #{length(values)} to register #{register}"
-    Enum.each(values, fn value -> write(spi, register, value) end)
-    spi
+  @doc """
+  Write one or more bytes to the given register
+  """
+  def write(spi, register, value) when is_integer(value) do
+    write(spi, register, [value])
   end
-  def write(spi, register, value)
+  def write(spi, register, values)
     when register in @valid_registers
-    and is_integer(value) do
-
-    Logger.debug "RegWrite #{ inspect(value) } >> #{ register }"
+    and is_list(values) do
 
     register = (register <<< 1) &&& 0x7E
 
-    SPI.transfer(spi, <<register, value>>)
+    Enum.each(values, fn value ->
+      {:ok, _return} = SPI.transfer(spi, <<register, value>>)
+    end)
+
     spi
   end
 
+  @doc """
+  Read the single byte value of the given register.
+  The result of `SPI.transfer/2` is always the same length as the input.
+  Since we have to send the register number and `0x00`, it means we always
+  get two bytes back. The first byte appears to often be `0`, but sometimes other
+  small values. But they have yet to seem relevant, so we discard it and consider
+  only the second byte to be the value.
+  """
   def read(spi, register) when register in @valid_registers do
     register = bor(0x80, (register <<< 1) &&& 0x7E)
     {:ok, <<_, value>>} = SPI.transfer(spi, <<register, 0x00>>)
     value
+  end
+
+  @doc """
+  Reads `bytes` number of bytes from the `register`. Returned as a list
+  """
+  def read(spi, register, bytes) when register in @valid_registers do
+    Enum.map(1..bytes, fn _byte_index -> read(spi, register) end)
   end
 
   def card_type(0x04), do: :uid_incomplete
