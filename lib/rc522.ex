@@ -60,9 +60,9 @@ defmodule RC522 do
   }
 
   @picc %{
-    request_idl:  0x26,
-    request_all:  0x52,
-    anticoll:     0x93
+    request_idl:  0x26, # REQuest command, Type A. Invites PICCs in state IDLE to go to READY and prepare for anticollision or selection. 7 bit frame.
+    request_all:  0x52, # Wake-UP command, Type A. Invites PICCs in state IDLE and HALT to go to READY(*) and prepare for anticollision or selection. 7 bit frame.
+    anticoll:     0x93  # Anti collision/Select, Cascade Level 1
   }
 
   # 9.3.2.5 Transmission control
@@ -96,7 +96,7 @@ defmodule RC522 do
   Bits 0 to 3 are the version
   """
   def hardware_version(spi) do
-    <<_, data>> = read(spi, @register.version)
+    data = read(spi, @register.version)
     %{
       chip_type: chip_type((data &&& 0xF0) >>> 4),
       version: data &&& 0x0F
@@ -108,12 +108,36 @@ defmodule RC522 do
 
   def read_id(spi) do
     request(spi, @picc.request_idl)
-    #anticoll
+    anticoll(spi)
+    #uid
   end
 
-  def request(spi, what) do
+  def card_id_to_number(data) do
+    data
+    |> Enum.take(5)
+    |> Enum.reduce(0, fn x, acc -> acc * 256 + x end)
+  end
+
+  @doc """
+  def MFRC522_Request(self, reqMode):
+    status = None
+    backBits = None
+    TagType = []
+
+    self.Write_MFRC522(self.BitFramingReg, 0x07)
+
+    TagType.append(reqMode)
+    (status, backData, backBits) = self.MFRC522_ToCard(self.PCD_TRANSCEIVE, TagType)
+
+    if ((status != self.MI_OK) | (backBits != 0x10)):
+        status = self.MI_ERR
+
+    return (status, backBits)
+  """
+  def request(spi, request_mode) do
+    # 0x07 start transmission
     write(spi, @register.bit_framing, 0x07)
-    to_card(spi, @command.transceive, what)
+    to_card(spi, @command.transceive, request_mode)
   end
 
   def to_card(spi, command, data) do
@@ -133,7 +157,25 @@ defmodule RC522 do
       set_bit_bask(spi, @register.bit_framing, 0x80)
     end
 
-    #clear_bit_mask(spi, @register.bit_framing, 0x80)
+    # TODO: replace this with that loop that reads the Comm IRQ and does stuff
+    :timer.sleep(100)
+
+    clear_bit_mask(spi, @register.bit_framing, 0x80)
+
+    {back_data, back_len} = read_fifo(spi)
+    {:ok, back_data, back_len}
+  end
+
+  def anticoll(spi) do
+    Logger.debug "Anticoll"
+    write(spi, @register.bit_framing, 0x00)
+
+    #{status, back_data, back_bits} =
+    to_card(spi, @command.transceive, [@picc.anticoll, 0x20])
+
+    # TODO: implement serial number check
+
+    #{status, back_data}
   end
 
   def reset(spi) do
@@ -146,23 +188,32 @@ defmodule RC522 do
   end
 
   def last_error(spi) do
-    <<_, err>> = read(spi, @register.error)
-    err &&& 0x1B
+    read(spi, @register.error) &&& 0x1B
   end
 
   def read_fifo(spi) do
-    <<_, level>> = read(spi, @register.fifo_level)
-    <<_, last_bits>> = read(spi, @register.control) &&& 0x07
+    level = read(spi, @register.fifo_level)
+    last_bits = read(spi, @register.control) &&& 0x07
+
     back_len = case last_bits do
       0 -> level * 8
       n -> (n - 1) * 8 + last_bits
     end
 
+    # max fifo length is 16
+    blocks = case level do
+      val when val == 0 -> 1
+      val when val > 16 -> 16
+      val -> val
+    end
 
+    back_data = Enum.map(0..blocks, fn _ix -> read(spi, @register.fifo_data) end)
+
+    {back_data, back_len}
   end
 
   def antenna_on(spi) do
-    <<_, state>> = read(spi, @register.tx_control)
+    state = read(spi, @register.tx_control)
     if (state &&& @tx_control.antenna_on) != @tx_control.antenna_on do
       set_bit_bask(spi, @register.tx_control, @tx_control.antenna_on)
     end
@@ -174,26 +225,49 @@ defmodule RC522 do
   end
 
   def set_bit_bask(spi, register, mask) when register in @valid_registers do
-    <<_, state>> = read(spi, register)
+    state = read(spi, register)
     value = bor(state, mask)
     write(spi, register, value)
   end
 
   def clear_bit_mask(spi, register, mask) when register in @valid_registers do
-    <<_, state>> = read(spi, register)
+    state = read(spi, register)
     value = state &&& bnot(mask)
     write(spi, register, value)
   end
 
-  def write(spi, register, value) when register in @valid_registers do
+  def write(spi, register, values) when is_list(values) do
+    Logger.debug "Writing #{length(values)} to register #{register}"
+    Enum.each(values, fn value -> write(spi, register, value) end)
+    spi
+  end
+  def write(spi, register, value)
+    when register in @valid_registers
+    and is_integer(value) do
+
+    Logger.debug "RegWrite #{ inspect(value) } >> #{ register }"
+
     register = (register <<< 1) &&& 0x7E
+
     SPI.transfer(spi, <<register, value>>)
     spi
   end
 
   def read(spi, register) when register in @valid_registers do
     register = bor(0x80, (register <<< 1) &&& 0x7E)
-    {:ok, val} = SPI.transfer(spi, <<register, 0x00>>)
-    val
+    {:ok, <<_, value>>} = SPI.transfer(spi, <<register, 0x00>>)
+    value
   end
+
+  def card_type(0x04), do: :uid_incomplete
+  def card_type(0x09), do: :mifare_mini
+  def card_type(0x08), do: :mifare_1k
+  def card_type(0x18), do: :mifare_4k
+  def card_type(0x00), do: :mifare_ul
+  def card_type(0x10), do: :mifare_plus
+  def card_type(0x11), do: :mifare_plus
+  def card_type(0x01), do: :tnp3xxx
+  def card_type(0x20), do: :iso_14443_4
+  def card_type(0x40), do: :iso_18092
+  def card_type(_), do: :unknown
 end
