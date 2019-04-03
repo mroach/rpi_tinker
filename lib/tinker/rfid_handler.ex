@@ -1,7 +1,7 @@
 defmodule Tinker.RFIDHandler do
-  def tag_scanned(val) do
+  def tag_scanned(tag_id) do
     timestamp = DateTime.utc_now |> DateTime.to_iso8601
-    line = [timestamp, val, "\n"] |> Enum.join(" ")
-    File.write("rfid_log.txt", line, [:append])
+    line = [timestamp, tag_id, "\n"] |> Enum.join(" ")
+    IO.puts(line)
   end
 end

@@ -15,7 +15,6 @@ defmodule Tinker.MixProject do
   def application do
     [
       mod: {Tinker.Application, []},
-      applications: [:nerves_io_rc522],
       extra_applications: [:logger]
     ]
   end
@@ -25,7 +24,7 @@ defmodule Tinker.MixProject do
     [
       {:circuits_gpio, "~> 0.4.1"},
       {:circuits_spi, "~> 0.1.3"},
-      {:nerves_io_rc522, "~> 0.1.0"}
+      {:rc522, "~> 0.1.0", github: "mroach/rc522_elixir"}
     ]
   end
 end
