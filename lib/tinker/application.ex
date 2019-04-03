@@ -10,7 +10,7 @@ defmodule Tinker.Application do
       Tinker.Buttons.Shuffle,
       {Tinker.Buzzer, [%{pin_id: 27}]},
       {Tinker.LED, [%{pin_id: 22}]},
-      {Tinker.RFIDMonitor, [%{tag_scanned: &Tinker.RFIDHandler.tag_scanned/1}]}
+      {Tinker.RFIDMonitor, [%{handler: Tinker.RFIDHandler}]}
     ]
 
     opts = [strategy: :one_for_one]
